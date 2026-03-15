@@ -57,8 +57,6 @@ export async function runSelectedEvaluation(
   let totalScore = 0;
 
   for (const imageName of selectedImageNames) {
-    console.log(`Testing selected: ${imageName}`);
-
     try {
       const dataUrl = testImages[imageName as keyof typeof testImages];
       const response = await fetch(dataUrl);
@@ -145,7 +143,6 @@ export async function runSelectedEvaluation(
     },
   };
 
-  console.log("Selected evaluation complete!");
   return results;
 }
 
@@ -164,8 +161,6 @@ export async function runEvaluation(
   let totalScore = 0;
 
   for (const imageName of imageNames) {
-    console.log(`Testing: ${imageName}`);
-
     try {
       const dataUrl = testImages[imageName as keyof typeof testImages];
       const response = await fetch(dataUrl);
@@ -252,7 +247,6 @@ export async function runEvaluation(
     },
   };
 
-  console.log("Evaluation complete!");
   return results;
 }
 
@@ -349,53 +343,4 @@ function calculateGrade(percentage: number): string {
   return "F";
 }
 
-export function displayEvaluationResults(
-  results: OverallResults,
-  container: HTMLElement
-): void {
-  const html = `
-    <div class="evaluation-results">
-      <h2>Evaluation Results</h2>
-      <div class="summary">
-        <h4>Summary Metrics:</h4>
-        <ul>
-          <li>Average Precision: ${(
-            results.summary.averagePrecision * 100
-          ).toFixed(1)}%</li>
-          <li>Average Recall: ${(results.summary.averageRecall * 100).toFixed(
-            1
-          )}%</li>
-          <li>Average F1 Score: ${results.summary.averageF1.toFixed(3)}</li>
-          <li>Average IoU: ${results.summary.averageIoU.toFixed(3)}</li>
-          <li>Total Processing Time: ${results.summary.totalProcessingTime.toFixed(
-            0
-          )}ms</li>
-        </ul>
-      </div>
-      
-      <div class="detailed-results">
-        <h4>Detailed Results:</h4>
-        ${results.testResults
-          .map(
-            (result) => `
-          <div class="test-result ${result.passed ? "passed" : "failed"}">
-            <h5>${result.imageName} ${result.passed ? "✓" : "x"}</h5>
-            <p><strong>Detected:</strong> ${
-              result.detectionResult.shapes.length
-            } shapes</p>
-            <p><strong>Processing Time:</strong> ${result.detectionResult.processingTime.toFixed(
-              0
-            )}ms</p>
-            <div class="feedback">
-              ${result.feedback.map((fb) => `<p>${fb}</p>`).join("")}
-            </div>
-          </div>
-        `
-          )
-          .join("")}
-      </div>
-    </div>
-  `;
 
-  container.innerHTML = html;
-}

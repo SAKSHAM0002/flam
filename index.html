@@ -4,41 +4,63 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Shape Detector</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet" />
   </head>
   <body>
     <div id="app">
-      <h1>Shape Detection</h1>
+      <!-- Base Page: Image Selection Only -->
+      <div class="base-page">
+        <header class="app-header">
+          <h1>Flam Assignment</h1>
+          <h2 class="shape-detector-heading">Shape Detector</h2>
+          <p class="subtitle">Upload or select images to automatically detect geometric shapes !</p>
+        </header>
 
-      <div class="evaluation-section">
-        <h2>Evaluation</h2>
-        <button id="evaluateButton">Run Selected Evaluation</button>
-        <div id="evaluationResults"></div>
+        <main class="main-content">
+          <!-- Test Images Grid -->
+          <section class="images-section">
+            <div id="testImages" class="test-images-grid"></div>
+          </section>
+
+          <!-- Evaluation Controls -->
+          <footer class="evaluation-footer">
+            <button id="evaluateButton" class="evaluate-btn">
+              Run Evaluation on Selected Images
+            </button>
+            <span class="selection-count">0 images selected</span>
+          </footer>
+        </main>
       </div>
 
-      <input
-        type="file"
-        id="imageInput"
-        accept="image/*"
-        style="display: none"
-      />
-
-      <div class="display-section">
-        <div class="image-container">
-          <h3>Original Image</h3>
-          <canvas id="originalCanvas"></canvas>
+      <!-- Modal for Results -->
+      <div id="resultsModal" class="results-modal">
+        <div class="modal-backdrop"></div>
+        <div class="modal-window">
+          <button class="modal-close" id="modalClose">&times;</button>
+          <div id="modalContent" class="modal-content"></div>
         </div>
-
-        <div class="results-container">
-          <h3>Detection Results</h3>
-          <div id="results"></div>
-        </div>
-      </div>
-
-      <div class="test-section">
-        <h2>Test Images</h2>
-        <div id="testImages"></div>
       </div>
     </div>
+
+    <!-- Hidden input for file upload -->
+    <input
+      type="file"
+      id="imageInput"
+      accept="image/*"
+      style="display: none"
+    />
+
+    <!-- Processing overlay -->
+    <div id="processingOverlay" class="processing-overlay hidden" aria-hidden="true">
+      <div class="processing-content">
+        <div class="processing-spinner"></div>
+        <p class="processing-text" id="processingOverlayText">Processing...</p>
+      </div>
+    </div>
+
+    <!-- Hidden canvas for image processing -->
+    <canvas id="originalCanvas" style="display: none;"></canvas>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
