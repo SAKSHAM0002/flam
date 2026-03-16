@@ -96,8 +96,22 @@ export function evaluateDetection(detected: any[], groundTruth: GroundTruthShape
     }
   }
   
+  // Handle the special case where both detected and ground truth are empty (true negative)
+  if (detected.length === 0 && groundTruth.length === 0) {
+    return {
+      precision: 1,
+      recall: 1,
+      f1_score: 1,
+      average_iou: 0,
+      center_point_accuracy: 0,
+      area_accuracy: 0,
+      confidence_calibration: 0,
+      processing_time: 0 
+    };
+  }
+  
   const precision = detected.length > 0 ? truePositives / detected.length : 0;
-  const recall = groundTruth.length > 0 ? truePositives / groundTruth.length : 1;
+  const recall = groundTruth.length > 0 ? truePositives / groundTruth.length : 0;
   const f1Score = precision + recall > 0 ? 2 * (precision * recall) / (precision + recall) : 0;
   
   return {
