@@ -81,7 +81,7 @@
       },
       "shapes": [
         {
-          "type": "rectangle",
+          "type": "square",
           "center": {
             "x": 100,
             "y": 100
@@ -93,8 +93,8 @@
             "height": 120
           },
           "area": 14400,
-          "confidence_expected": 0.98,
-          "notes": "Perfect square, should be detected as rectangle"
+          "confidence_expected": 0.96,
+          "notes": "Perfect square (120x120 pixels with 1.0 aspect ratio)"
         }
       ]
     },
