@@ -37,306 +37,566 @@ export class ShapeDetector {
   }
 
   /**
-   * MAIN ALGORITHM TO IMPLEMENT
-   * Method for detecting shapes in an image
-   * @param imageData - ImageData from canvas
-   * @returns Promise<DetectionResult> - Detection results
+   * Improved shape detection pipeline using convex hull and topology
+   * 
+   * Pipeline:
+   * 1. RGB to Grayscale
+   * 2. Gaussian blur with edge clamping (fixes border pixel bug)
+   * 3. Global threshold (128 default, tunable for antialiased images)
+   * 4. Morphological closing with 8-connectivity (robust gap filling)
+   * 5. Connected components with 8-connectivity (avoids diagonal fragmentation)
+   * 6. Convex hull of boundary pixels (Monotone Chain algorithm)
+   * 7. Solidity = area / convexHullArea (true definition)
+   * 8. Classification by hull vertex count + solidity + circularity
+   * 9. Confidence scoring
    */
   async detectShapes(imageData: ImageData): Promise<DetectionResult> {
     const startTime = performance.now();
-    const shapes: DetectedShape[] = [];
+    const detectedShapes: DetectedShape[] = [];
 
-    // Step 1: Preprocess image (convert to grayscale and apply threshold)
-    const processed = this.preprocessImage(imageData);
+    // Step 1: grayscale
+    const grayscale = this.convertToGrayscale(imageData);
 
-    // Step 2: Find contours/blobs in the image
-    const contours = this.findContours(processed);
+    // Step 2: gaussian blur (with edge clamping to fix border pixel bug)
+    const blurred = this.applyGaussianBlur(grayscale, imageData.width, imageData.height);
 
-    // Step 3: Analyze each contour and classify shape
-    for (const contour of contours) {
-      if (contour.length < 4) continue; // Need at least 4 points for a shape
+    // Step 3: global threshold (tunable constant for different image types)
+    const THRESH = 128; // good default for anti-aliased black-on-white shapes
+    const binary = this.applyGlobalThreshold(blurred, THRESH);
 
-      const boundingBox = this.getBoundingBox(contour);
-      const area = this.calculateArea(contour);
-      const center = this.getCenter(boundingBox);
+    // Step 3b: morphological closing with 8-connectivity
+    const closed = this.applyMorphologicalClosing(binary, imageData.width, imageData.height);
 
-      // Skip very small shapes (noise)
-      if (area < 50) continue;
+    // Step 4: label connected components (8-connected for robustness)
+    const components = this.labelConnectedComponents(closed, imageData.width, imageData.height);
 
-      // Classify the shape based on contour properties
-      const shapeType = this.classifyShape(contour, area, boundingBox);
+    console.log(`[DEBUG] Found ${components.size} components`);
 
-      shapes.push({
-        type: shapeType,
-        confidence: this.calculateConfidence(contour, shapeType),
-        boundingBox,
-        center,
-        area,
+    // Process each component
+    for (const [label, pixels] of components.entries()) {
+      if (label === 0 || pixels.length < 80) continue; // skip background and tiny noise
+
+      console.log(`[DEBUG] Processing component ${label} with ${pixels.length} pixels`);
+
+      // compute region geometry and boundary
+      const region = this.computeRegionMetrics(pixels, imageData.width, imageData.height);
+
+      if (region.area < 50) {
+        console.log(`[DEBUG]   Shape too small: area=${region.area}`);
+        continue;
+      }
+
+      // compute convex hull of boundary pixels (unordered)
+      const rawHull = this.convexHull(region.boundaryPoints);
+
+      // use bounding-box-based epsilon (stable) — scale with shape size, not raw hull perimeter
+      const maxDim = Math.max(region.boundingBox.width, region.boundingBox.height);
+      const eps = Math.max(1, Math.round(maxDim * 0.015)); // 1.5% of max dimension, more conservative
+
+      // simplify polygon to collapse edge points into true corners
+      let hull = this.simplifyPolygon(rawHull, eps);
+
+      // remove vertices that are extremely close to each other (noise)
+      hull = this.deduplicateCloseVertices(hull, Math.max(1, Math.round(maxDim * 0.005)));
+
+      // remove near-collinear vertices (internal angle ≈ 180°) using a conservative angle threshold
+      hull = this.mergeCollinearVertices(hull, 12); // 12 degrees: more aggressive collinear removal for pentagon robustness
+
+      // recompute measurements on the cleaned hull
+      const hullArea = this.polygonArea(hull);
+      const hullPerimeter = this.polygonPerimeter(hull);
+      let hullVertexCount = hull.length;
+
+      console.log(`[DEBUG]   Raw hull vertices: ${rawHull.length}, Simplified hull vertices: ${hullVertexCount}, eps:${eps}`);
+      console.log(`[DEBUG] rawHull(${rawHull.length}):`, rawHull.map(p => `${Math.round(p.x)},${Math.round(p.y)}`).slice(0, 20));
+      console.log(`[DEBUG] simplifiedHull(${hull.length}):`, hull.map(p => `${Math.round(p.x)},${Math.round(p.y)}`));
+
+      // solidity: area / convexHullArea (true definition)
+      const solidity = hullArea > 0 ? region.area / hullArea : 1;
+
+      // circularity = 4πA / P^2 (use hull perimeter)
+      const perimeter = hullPerimeter || region.perimeter || 1;
+      const circularity = (4 * Math.PI * region.area) / (perimeter * perimeter);
+
+      console.log(`[DEBUG]   Boundary: ${region.boundaryPoints.length} pixels, Hull: ${hullVertexCount} vertices`);
+      console.log(`[DEBUG]   Area: ${region.area}, Circularity: ${circularity.toFixed(3)}, Solidity: ${solidity.toFixed(3)}`);
+
+      // compute internal angles at hull vertices (simple validation)
+      const angles = this.computePolygonInternalAngles(hull);
+      console.log(`[DEBUG] angles:`, angles.map(a => a.toFixed(1)));
+
+      // angle-based safety: if hull reports 4 vertices but has 2+ nearly-straight angles, treat as degenerate triangle
+      if (hullVertexCount === 4 && angles.length === 4) {
+        const largeAngles = angles.filter(a => a > 150).length;
+        
+        // if two+ angles are almost straight lines → degenerate quad from curved triangle
+        if (largeAngles >= 2) {
+          console.log(`[DEBUG] Degenerate quad → triangle (${largeAngles} angles > 150°)`);
+          hullVertexCount = 3;
+        }
+      }
+
+      console.log(`[DEBUG] FINAL VERTEX COUNT: ${hullVertexCount}`);
+      console.log(
+        "[DEBUG] Classification metrics - Vertices:", hullVertexCount,
+        "Solidity:", solidity.toFixed(3),
+        "Circularity:", circularity.toFixed(3)
+      );
+
+      let type: DetectedShape["type"] = "star";
+
+      // ⭐ Detect concave shapes FIRST (stars, etc.) using solidity
+      if (solidity < 0.85 && hullVertexCount >= 5) {
+        type = "star";
+        console.log(`[DEBUG]   → STAR (concave shape, solidity ${solidity.toFixed(3)} < 0.85)`);
+      }
+      // Normal convex polygons by vertex count
+      else if (hullVertexCount === 3) {
+        type = "triangle";
+        console.log(`[DEBUG]   → TRIANGLE (${hullVertexCount} vertices)`);
+      }
+      else if (hullVertexCount === 4) {
+        // Only classify as rectangle if 3+ angles are near 90° (true right angles)
+        const rectAngles = angles.filter(a => Math.abs(a - 90) < 20).length;
+        
+        if (rectAngles >= 3) {
+          type = "rectangle";
+          console.log(`[DEBUG]   → RECTANGLE (${hullVertexCount} vertices, ${rectAngles} right angles)`);
+        } else {
+          // Skewed quad from curved triangle or other distorted shape
+          type = "triangle";
+          console.log(`[DEBUG]   → TRIANGLE (4-vertex shape with only ${rectAngles} right angles, likely curved triangle)`);
+        }
+      }
+      else if (hullVertexCount === 5 || hullVertexCount === 6) {
+        type = "pentagon";
+        console.log(`[DEBUG]   → PENTAGON (${hullVertexCount} vertices, tolerant)`);
+      }
+      // Circles usually produce many vertices after simplification
+      else if (hullVertexCount >= 7 && circularity > 0.88) {
+        type = "circle";
+        console.log(`[DEBUG]   → CIRCLE (${hullVertexCount} vertices, circularity ${circularity.toFixed(3)})`);
+      }
+      // Strict fallback: only circle if very round
+      else if (circularity > 0.88) {
+        type = "circle";
+        console.log(`[DEBUG]   → CIRCLE (high circularity ${circularity.toFixed(3)})`);
+      }
+      else {
+        type = "star";
+        console.log(`[DEBUG]   → STAR (fallback safe classification)`);
+      }
+
+      // confidence scoring (mix of metrics & vertex match)
+      let confidence = 0.85;
+      if (type === "circle") confidence = Math.min(0.97, 0.4 + circularity);
+      if (type === "triangle" && hullVertexCount === 3) confidence = 0.92;
+      if (type === "rectangle" && hullVertexCount === 4) confidence = 0.95;
+      if (type === "pentagon" && hullVertexCount === 5) confidence = 0.92;
+      if (type === "star") confidence = Math.max(0.65, 0.9 - solidity);
+
+      confidence = Math.max(0.5, Math.min(0.97, confidence));
+
+      detectedShapes.push({
+        type,
+        confidence,
+        boundingBox: region.boundingBox,
+        center: region.center,
+        area: region.area,
       });
     }
 
     const processingTime = performance.now() - startTime;
-
     return {
-      shapes,
+      shapes: detectedShapes,
       processingTime,
       imageWidth: imageData.width,
       imageHeight: imageData.height,
     };
   }
 
-  private preprocessImage(imageData: ImageData): Uint8ClampedArray {
-    const data = imageData.data;
-    const processed = new Uint8ClampedArray(imageData.width * imageData.height);
+  // ---------- Image processing helpers ----------
 
-    // Convert to grayscale using luminosity method
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-      processed[i / 4] = gray;
+  private convertToGrayscale(imageData: ImageData): Uint8ClampedArray {
+    const d = imageData.data;
+    const out = new Uint8ClampedArray(imageData.width * imageData.height);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+      out[j] = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
     }
-
-    // Apply binary threshold
-    const threshold = 128;
-    for (let i = 0; i < processed.length; i++) {
-      processed[i] = processed[i] > threshold ? 255 : 0;
-    }
-
-    return processed;
+    return out;
   }
 
-  private findContours(processed: Uint8ClampedArray): Point[][] {
-    const visited = new Set<number>();
-    const contours: Point[][] = [];
-    const width = this.canvas.width;
-    const height = this.canvas.height;
+  private applyGaussianBlur(gray: Uint8ClampedArray, w: number, h: number): Uint8ClampedArray {
+    const out = new Uint8ClampedArray(gray.length);
+    const kernel = [1, 2, 1, 2, 4, 2, 1, 2, 1];
+    const ksum = 16;
 
-    for (let i = 0; i < processed.length; i++) {
-      const x = i % width;
-      const y = Math.floor(i / width);
+    // convolution with clamped-edge behavior (replicate border pixels)
+    // This fixes the border-zero bug in the original implementation
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let sum = 0;
+        let k = 0;
+        for (let ky = -1; ky <= 1; ky++) {
+          for (let kx = -1; kx <= 1; kx++) {
+            const sx = Math.max(0, Math.min(w - 1, x + kx));
+            const sy = Math.max(0, Math.min(h - 1, y + ky));
+            sum += gray[sy * w + sx] * kernel[k++];
+          }
+        }
+        out[y * w + x] = Math.round(sum / ksum);
+      }
+    }
+    return out;
+  }
 
-      if (processed[i] > 128 && !visited.has(i)) {
-        // Found a white pixel, start flood fill
-        const contour = this.floodFill(processed, x, y, visited, width, height);
-        if (contour.length > 3) {
-          contours.push(contour);
+  private applyGlobalThreshold(gray: Uint8ClampedArray, threshold = 128): Uint8ClampedArray {
+    const out = new Uint8ClampedArray(gray.length);
+    for (let i = 0; i < gray.length; i++) {
+      out[i] = gray[i] < threshold ? 255 : 0;
+    }
+    return out;
+  }
+
+  private applyMorphologicalClosing(bin: Uint8ClampedArray, w: number, h: number): Uint8ClampedArray {
+    // dilation then erosion using 8-connectivity for robustness
+    const dilated = new Uint8ClampedArray(bin.length);
+    
+    // dilation: if any 8-neighbor is foreground, set foreground
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const idx = y * w + x;
+        if (bin[idx] > 0) {
+          dilated[idx] = 255;
+          continue;
+        }
+        let any = false;
+        for (let ny = Math.max(0, y - 1); ny <= Math.min(h - 1, y + 1) && !any; ny++) {
+          for (let nx = Math.max(0, x - 1); nx <= Math.min(w - 1, x + 1); nx++) {
+            if (bin[ny * w + nx] > 0) {
+              any = true;
+              break;
+            }
+          }
+        }
+        dilated[idx] = any ? 255 : 0;
+      }
+    }
+
+    // erosion: only keep foreground if all 8-neighbors are foreground
+    const eroded = new Uint8ClampedArray(bin.length);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const idx = y * w + x;
+        if (dilated[idx] === 0) {
+          eroded[idx] = 0;
+          continue;
+        }
+        let all = true;
+        for (let ny = Math.max(0, y - 1); ny <= Math.min(h - 1, y + 1) && all; ny++) {
+          for (let nx = Math.max(0, x - 1); nx <= Math.min(w - 1, x + 1); nx++) {
+            if (dilated[ny * w + nx] === 0) {
+              all = false;
+              break;
+            }
+          }
+        }
+        eroded[idx] = all ? 255 : 0;
+      }
+    }
+    return eroded;
+  }
+
+  private labelConnectedComponents(bin: Uint8ClampedArray, w: number, h: number): Map<number, Array<{ x: number; y: number }>> {
+    const visited = new Uint8Array(bin.length);
+    const components = new Map<number, Array<{ x: number; y: number }>>();
+    let label = 1;
+
+    for (let i = 0; i < bin.length; i++) {
+      if (visited[i] || bin[i] === 0) continue;
+      
+      // BFS with 8-connectivity
+      const q: number[] = [i];
+      visited[i] = 1;
+      const arr: Array<{ x: number; y: number }> = [];
+      
+      while (q.length) {
+        const idx = q.shift()!;
+        const x = idx % w;
+        const y = Math.floor(idx / w);
+        arr.push({ x, y });
+
+        // 8 neighbors
+        for (let ny = Math.max(0, y - 1); ny <= Math.min(h - 1, y + 1); ny++) {
+          for (let nx = Math.max(0, x - 1); nx <= Math.min(w - 1, x + 1); nx++) {
+            const nidx = ny * w + nx;
+            if (!visited[nidx] && bin[nidx] > 0) {
+              visited[nidx] = 1;
+              q.push(nidx);
+            }
+          }
+        }
+      }
+      components.set(label++, arr);
+    }
+    return components;
+  }
+
+  // ---------- Geometry & metrics ----------
+
+  private computeRegionMetrics(regionPixels: Array<{ x: number; y: number }>, w: number, h: number) {
+    const set = new Set<string>();
+    for (const p of regionPixels) set.add(`${p.x},${p.y}`);
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of regionPixels) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const boundingBox = { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+    const center = { x: minX + boundingBox.width / 2, y: minY + boundingBox.height / 2 };
+
+    const area = regionPixels.length;
+
+    // boundary detection (unordered list of boundary pixels)
+    const boundaryPoints: Point[] = [];
+    for (const p of regionPixels) {
+      let isBoundary = false;
+      for (let dy = -1; dy <= 1 && !isBoundary; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = p.x + dx;
+          const ny = p.y + dy;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h || !set.has(`${nx},${ny}`)) {
+            isBoundary = true;
+            break;
+          }
+        }
+      }
+      if (isBoundary) boundaryPoints.push({ x: p.x, y: p.y });
+    }
+
+    // perimeter: count boundary pixels with correction for diagonals
+    let perimeter = 0;
+    const bset = new Set(boundaryPoints.map(p => `${p.x},${p.y}`));
+    for (const p of boundaryPoints) {
+      for (let ny = p.y - 1; ny <= p.y + 1; ny++) {
+        for (let nx = p.x - 1; nx <= p.x + 1; nx++) {
+          if (nx === p.x && ny === p.y) continue;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h || !bset.has(`${nx},${ny}`)) {
+            const dx = nx - p.x;
+            const dy = ny - p.y;
+            const d = Math.hypot(dx, dy);
+            perimeter += d;
+          }
         }
       }
     }
+    perimeter = perimeter / 2; // empirical correction
 
-    return contours;
+    const aspectRatio = boundingBox.height > 0 ? boundingBox.width / boundingBox.height : 1;
+
+    return { area, perimeter, boundingBox, center, boundaryPoints, aspectRatio };
   }
 
-  private floodFill(
-    processed: Uint8ClampedArray,
-    startX: number,
-    startY: number,
-    visited: Set<number>,
-    width: number,
-    height: number
-  ): Point[] {
-    const contour: Point[] = [];
-    const queue = [[startX, startY]];
-    const width_mod = width;
+  // Monotone Chain convex hull algorithm
+  private convexHull(points: Point[]): Point[] {
+    if (!points || points.length <= 1) return points.slice();
 
-    while (queue.length > 0) {
-      const [x, y] = queue.shift()!;
-      const idx = y * width_mod + x;
+    const pts = points.slice().sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
 
-      if (
-        x < 0 ||
-        x >= width_mod ||
-        y < 0 ||
-        y >= height ||
-        visited.has(idx) ||
-        processed[idx] < 128
-      ) {
-        continue;
+    const cross = (o: Point, a: Point, b: Point) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+
+    const lower: Point[] = [];
+    for (const p of pts) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
+        lower.pop();
       }
-
-      visited.add(idx);
-      contour.push({ x, y });
-
-      // Add neighbors to queue (4-connectivity)
-      queue.push([x + 1, y]);
-      queue.push([x - 1, y]);
-      queue.push([x, y + 1]);
-      queue.push([x, y - 1]);
+      lower.push(p);
     }
 
-    return contour;
-  }
-
-  private getBoundingBox(contour: Point[]): {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  } {
-    let minX = Infinity,
-      minY = Infinity,
-      maxX = -Infinity,
-      maxY = -Infinity;
-
-    for (const point of contour) {
-      minX = Math.min(minX, point.x);
-      maxX = Math.max(maxX, point.x);
-      minY = Math.min(minY, point.y);
-      maxY = Math.max(maxY, point.y);
+    const upper: Point[] = [];
+    for (let i = pts.length - 1; i >= 0; i--) {
+      const p = pts[i];
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
+        upper.pop();
+      }
+      upper.push(p);
     }
 
-    return {
-      x: minX,
-      y: minY,
-      width: maxX - minX,
-      height: maxY - minY,
-    };
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
   }
 
-  private getCenter(bbox: {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  }): Point {
-    return {
-      x: bbox.x + bbox.width / 2,
-      y: bbox.y + bbox.height / 2,
-    };
-  }
-
-  private calculateArea(contour: Point[]): number {
-    // Shoelace formula for polygon area
+  private polygonArea(poly: Point[]): number {
+    if (!poly || poly.length < 3) return 0;
     let area = 0;
-    for (let i = 0; i < contour.length; i++) {
-      const p1 = contour[i];
-      const p2 = contour[(i + 1) % contour.length];
-      area += p1.x * p2.y - p2.x * p1.y;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i];
+      const b = poly[(i + 1) % poly.length];
+      area += a.x * b.y - a.y * b.x;
     }
     return Math.abs(area) / 2;
   }
 
-  private classifyShape(
-    contour: Point[],
-    area: number,
-    bbox: { x: number; y: number; width: number; height: number }
-  ): "circle" | "triangle" | "rectangle" | "pentagon" | "star" {
-    const aspectRatio = bbox.width / bbox.height;
-
-    // Approximate the contour to simplify it
-    const simplified = this.simplifyContour(contour);
-    const vertices = simplified.length;
-
-    // Check circularity using area and perimeter
-    const perimeter = this.calculatePerimeter(contour);
-    const circularity = (4 * Math.PI * area) / (perimeter * perimeter);
-
-    // If very circular (circularity > 0.7), it's a circle
-    if (circularity > 0.7) {
-      return "circle";
+  private polygonPerimeter(poly: Point[]): number {
+    if (!poly || poly.length < 2) return 0;
+    let p = 0;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i];
+      const b = poly[(i + 1) % poly.length];
+      p += Math.hypot(b.x - a.x, b.y - a.y);
     }
+    return p;
+  }
 
-    // Count vertices to classify polygon
-    if (vertices <= 4) {
-      // Check if it's more square-like or rectangular
-      if (Math.abs(aspectRatio - 1) < 0.3) {
-        return "rectangle"; // More like square
+  // Ramer-Douglas-Peucker polygon simplification for CLOSED polygons
+  private simplifyPolygon(points: Point[], epsilon = 4): Point[] {
+    if (!points || points.length < 3) return points.slice();
+
+    const perpendicularDistance = (pt: Point, a: Point, b: Point) => {
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+
+      if (dx === 0 && dy === 0) {
+        return Math.hypot(pt.x - a.x, pt.y - a.y);
       }
-      return "rectangle";
-    } else if (vertices === 5) {
-      return "pentagon";
-    } else if (vertices > 6 && vertices <= 8) {
-      return "star";
-    } else if (vertices === 3) {
-      return "triangle";
-    }
 
-    // Default classification based on vertices
-    if (vertices < 4) return "triangle";
-    if (vertices < 6) return "pentagon";
-    return "star";
+      const t = ((pt.x - a.x) * dx + (pt.y - a.y) * dy) / (dx * dx + dy * dy);
+      const projX = a.x + t * dx;
+      const projY = a.y + t * dy;
+
+      return Math.hypot(pt.x - projX, pt.y - projY);
+    };
+
+    const rdp = (pts: Point[]): Point[] => {
+      if (pts.length <= 2) return pts;
+
+      let dmax = 0;
+      let index = 0;
+
+      for (let i = 1; i < pts.length - 1; i++) {
+        const d = perpendicularDistance(pts[i], pts[0], pts[pts.length - 1]);
+        if (d > dmax) {
+          index = i;
+          dmax = d;
+        }
+      }
+
+      if (dmax > epsilon) {
+        const left = rdp(pts.slice(0, index + 1));
+        const right = rdp(pts.slice(index));
+        return left.slice(0, -1).concat(right);
+      }
+
+      return [pts[0], pts[pts.length - 1]];
+    };
+
+    // Close the polygon by appending the first point
+    const closed = [...points, points[0]];
+
+    const simplified = rdp(closed);
+
+    // Remove the duplicated closing point
+    simplified.pop();
+
+    return simplified.length >= 3 ? simplified : points.slice();
   }
 
-  private simplifyContour(contour: Point[], epsilon: number = 2): Point[] {
-    // Simple contour simplification using distance threshold
-    if (contour.length < 3) return contour;
+  // remove vertices that are closer than `tol` pixels (keep first, drop subsequent close ones)
+  private deduplicateCloseVertices(poly: Point[], tol = 2): Point[] {
+    if (!poly || poly.length < 2) return poly.slice();
+    const out: Point[] = [];
+    let last = poly[0];
+    out.push(last);
+    for (let i = 1; i < poly.length; i++) {
+      const p = poly[i];
+      const d = Math.hypot(p.x - last.x, p.y - last.y);
+      if (d >= tol) {
+        out.push(p);
+        last = p;
+      }
+    }
+    // final check: if first and last are close, remove last
+    if (out.length > 1) {
+      const d0 = Math.hypot(out[0].x - out[out.length - 1].x, out[0].y - out[out.length - 1].y);
+      if (d0 < tol) out.pop();
+    }
+    return out;
+  }
 
-    const simplified: Point[] = [contour[0]];
+  // merge/remove vertices where the internal angle is extremely flat (near 180°).
+  // angleThresholdDeg: if internal angle > (180 - angleThresholdDeg) => treat as collinear and remove the vertex.
+  private mergeCollinearVertices(poly: Point[], angleThresholdDeg = 20): Point[] {
+    if (!poly || poly.length < 3) return poly.slice();
 
-    for (let i = 1; i < contour.length - 1; i++) {
-      const prev = simplified[simplified.length - 1];
-      const curr = contour[i];
-      const next = contour[i + 1];
+    // helper to compute internal angle at index i (degrees)
+    const internalAngle = (pts: Point[], i: number) => {
+      const n = pts.length;
+      const prev = pts[(i - 1 + n) % n];
+      const cur = pts[i];
+      const next = pts[(i + 1) % n];
+      const v1x = prev.x - cur.x, v1y = prev.y - cur.y;
+      const v2x = next.x - cur.x, v2y = next.y - cur.y;
+      const dot = v1x * v2x + v1y * v2y;
+      const m1 = Math.hypot(v1x, v1y) || 1;
+      const m2 = Math.hypot(v2x, v2y) || 1;
+      let cos = dot / (m1 * m2);
+      cos = Math.max(-1, Math.min(1, cos));
+      const ang = (Math.acos(cos) * 180) / Math.PI;
+      return ang;
+    };
 
-      const dist = this.pointToLineDistance(curr, prev, next);
-      if (dist > epsilon) {
-        simplified.push(curr);
+    // iterate and remove near-collinear vertices (single pass; repeat if you want stronger reduction)
+    const out: Point[] = [];
+    const n = poly.length;
+    for (let i = 0; i < n; i++) {
+      const ang = internalAngle(poly, i);
+      // if angle is very flat (close to 180 deg) -> skip this vertex
+      if (ang > (180 - angleThresholdDeg)) {
+        // skip (merge prev & next across this point)
+        continue;
+      } else {
+        out.push(poly[i]);
       }
     }
 
-    simplified.push(contour[contour.length - 1]);
-    return simplified;
+    // if removal collapsed too much, fallback to original
+    if (out.length < 3) return poly.slice();
+
+    // final tighten: if first and last are duplicates due to skipping, remove duplicate last
+    const d0 = Math.hypot(out[0].x - out[out.length - 1].x, out[0].y - out[out.length - 1].y);
+    if (d0 < 1) out.pop();
+
+    return out;
   }
 
-  private pointToLineDistance(
-    point: Point,
-    lineStart: Point,
-    lineEnd: Point
-  ): number {
-    const numerator = Math.abs(
-      (lineEnd.y - lineStart.y) * point.x -
-        (lineEnd.x - lineStart.x) * point.y +
-        lineEnd.x * lineStart.y -
-        lineEnd.y * lineStart.x
-    );
-    const denominator = Math.sqrt(
-      Math.pow(lineEnd.y - lineStart.y, 2) +
-        Math.pow(lineEnd.x - lineStart.x, 2)
-    );
-    return numerator / denominator;
-  }
-
-  private calculatePerimeter(contour: Point[]): number {
-    let perimeter = 0;
-    for (let i = 0; i < contour.length; i++) {
-      const p1 = contour[i];
-      const p2 = contour[(i + 1) % contour.length];
-      const dist = Math.sqrt(
-        Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2)
-      );
-      perimeter += dist;
+  // sample radial-signature and count peaks
+  private computePolygonInternalAngles(poly: Point[]): number[] {
+    if (!poly || poly.length < 3) return [];
+    const angles: number[] = [];
+    const n = poly.length;
+    for (let i = 0; i < n; i++) {
+      const prev = poly[(i - 1 + n) % n];
+      const cur = poly[i];
+      const next = poly[(i + 1) % n];
+      const v1x = prev.x - cur.x;
+      const v1y = prev.y - cur.y;
+      const v2x = next.x - cur.x;
+      const v2y = next.y - cur.y;
+      const dot = v1x * v2x + v1y * v2y;
+      const mag1 = Math.hypot(v1x, v1y) || 1;
+      const mag2 = Math.hypot(v2x, v2y) || 1;
+      let cos = dot / (mag1 * mag2);
+      cos = Math.max(-1, Math.min(1, cos));
+      const angleRad = Math.acos(cos);
+      const angleDeg = (angleRad * 180) / Math.PI;
+      angles.push(angleDeg);
     }
-    return perimeter;
-  }
-
-  private calculateConfidence(
-    contour: Point[],
-    shapeType: string
-  ): number {
-    // Base confidence on shape regularity and area
-    const bbox = this.getBoundingBox(contour);
-    const area = this.calculateArea(contour);
-    const perim = this.calculatePerimeter(contour);
-
-    // Calculate bounding box area
-    const bboxArea = bbox.width * bbox.height;
-
-    // Confidence based on how much of bbox is filled
-    const fillRatio = area / bboxArea;
-
-    // Start with base confidence
-    let confidence = Math.min(fillRatio, 1.0);
-
-    // Boost for circles (high circularity)
-    if (shapeType === "circle") {
-      const circularity = (4 * Math.PI * area) / (perim * perim);
-      confidence = Math.max(confidence, circularity);
-    }
-
-    // Ensure minimum confidence
-    return Math.max(0.5, Math.min(0.95, confidence));
+    return angles;
   }
 
   loadImage(file: File): Promise<ImageData> {
