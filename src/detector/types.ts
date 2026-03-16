@@ -4,7 +4,7 @@ export interface Point {
 }
 
 export interface DetectedShape {
-  type: "circle" | "triangle" | "rectangle" | "pentagon" | "star";
+  type: "circle" | "triangle" | "rectangle" | "square" | "pentagon" | "star";
   confidence: number;
   boundingBox: {
     x: number;

@@ -14,7 +14,9 @@ export class ShapeClassifier {
     hullVertexCount: number,
     angles: number[],
     solidity: number,
-    circularity: number
+    circularity: number,
+    bboxWidth: number,
+    bboxHeight: number
   ): { type: DetectedShape["type"]; confidence: number } {
     let type: DetectedShape["type"] = "star";
 
@@ -29,12 +31,20 @@ export class ShapeClassifier {
       console.log(`[DEBUG]   → TRIANGLE (${hullVertexCount} vertices)`);
     }
     else if (hullVertexCount === 4) {
-      // Only classify as rectangle if 3+ angles are near 90° (true right angles)
+      // Only classify as rectangle/square if 3+ angles are near 90° (true right angles)
       const rectAngles = angles.filter(a => Math.abs(a - 90) < 20).length;
       
       if (rectAngles >= 3) {
-        type = "rectangle";
-        console.log(`[DEBUG]   → RECTANGLE (${hullVertexCount} vertices, ${rectAngles} right angles)`);
+        // Distinguish square vs rectangle by aspect ratio
+        const ratio = Math.max(bboxWidth, bboxHeight) / Math.min(bboxWidth, bboxHeight);
+        
+        if (ratio < 1.1) {
+          type = "square";
+          console.log(`[DEBUG]   → SQUARE (${hullVertexCount} vertices, ${rectAngles} right angles, ratio ${ratio.toFixed(3)})`);
+        } else {
+          type = "rectangle";
+          console.log(`[DEBUG]   → RECTANGLE (${hullVertexCount} vertices, ${rectAngles} right angles, ratio ${ratio.toFixed(3)})`);
+        }
       } else {
         // Skewed quad from curved triangle or other distorted shape
         type = "triangle";
@@ -65,6 +75,7 @@ export class ShapeClassifier {
     if (type === "circle") confidence = Math.min(0.97, 0.4 + circularity);
     if (type === "triangle" && hullVertexCount === 3) confidence = 0.92;
     if (type === "rectangle" && hullVertexCount === 4) confidence = 0.95;
+    if (type === "square" && hullVertexCount === 4) confidence = 0.96;
     if (type === "pentagon" && hullVertexCount === 5) confidence = 0.92;
     if (type === "star") confidence = Math.max(0.65, 0.9 - solidity);
 

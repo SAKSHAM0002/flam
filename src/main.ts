@@ -94,7 +94,9 @@ export class ShapeDetector {
         hullVertexCount,
         angles,
         solidity,
-        circularity
+        circularity,
+        region.boundingBox.width,
+        region.boundingBox.height
       );
 
       detectedShapes.push({
